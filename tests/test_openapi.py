@@ -280,7 +280,8 @@ def test_build_mcp_spec_collapses_exactly_the_known_aliases():
             "jira_issue_comments": 1,
             "jira_fields": 1,
         },  # fmt: skip
-        # ListBuckets answers at both `/s3` and `/s3/`; bucket GET answers at both `/{bucket}` and `/{bucket}/`
+        # ListBuckets answers at both `/s3` and `/s3/`, a bucket's GET at both `/{bucket}` and
+        # `/{bucket}/`
         "s3": {"list_buckets": 1, "bucket_get": 1},
     }
     for source, prefixes in openapi.SOURCE_PREFIXES.items():
