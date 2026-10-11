@@ -518,6 +518,38 @@ def test_slack_history_rejects_an_invalid_cursor(client, admin_h):
     assert j == {"ok": False, "error": "invalid_cursor"}
 
 
+@pytest.mark.parametrize(
+    "params, error",
+    [
+        # Real reads `latest`, then `oldest`, then the cursor, so with two or more unreadable
+        # arguments it names the first one it reads. These are the measured rows.
+        ({"oldest": "abc", "latest": "abc"}, "invalid_ts_latest"),
+        ({"oldest": "abc", "cursor": "zzz"}, "invalid_ts_oldest"),
+        ({"latest": "abc", "cursor": "zzz"}, "invalid_ts_latest"),
+        ({"oldest": "abc", "latest": "abc", "cursor": "zzz"}, "invalid_ts_latest"),
+        ({"oldest": "inf", "latest": "inf"}, "invalid_ts_latest"),
+        ({"oldest": "abc", "latest": "inf"}, "invalid_ts_latest"),
+        ({"oldest": "inf", "latest": "abc"}, "invalid_ts_latest"),
+        ({"oldest": "nan", "cursor": "zzz"}, "invalid_ts_oldest"),
+        # The single-argument answers the order must not move.
+        ({"cursor": "zzz"}, "invalid_cursor"),
+        ({"oldest": "abc"}, "invalid_ts_oldest"),
+        ({"latest": "abc"}, "invalid_ts_latest"),
+    ],
+)
+def test_slack_history_names_the_first_error_real_would(client, admin_h, params, error):
+    """Real Slack answers the errors in the order it reads them — `latest`, then `oldest`, then
+    the cursor — so a request carrying two or more unreadable arguments is named by the first
+    real would read. `_slack_ts` and the handler's comment record the measurement."""
+    r = client.get(
+        "/slack/api/conversations.history",
+        headers=admin_h,
+        params={"channel": _a_channel_id(client, admin_h), **params},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"ok": False, "error": error}
+
+
 def test_slack_members_are_the_channels_own_speakers(client, admin_h, tokens, ro_conn):
     """Every public channel reported the same membership — the entire roster — because the handler
     skipped membership for a public channel. Real Slack's membership differs per channel, and a

@@ -608,16 +608,20 @@ async def conversations_history(request: Request):
     # ~1000 roots x their authors/reply_users via users.info — slow. has_more/next_cursor still let
     # it paginate for more.
     limit = min(_limit(request), _HISTORY_MAX_ROOTS)
+    # Slack history returns only top-level messages (thread roots + standalone);
+    # replies live under conversations.replies.
+    # Real reads `latest` before `oldest`, and either timestamp before the cursor, so the errors
+    # answer in that order: measured against slack.com/api on 2026-10-10, `oldest=abc&latest=abc`
+    # answers `invalid_ts_latest`, and an unreadable timestamp beside an undecodable cursor
+    # answers the timestamp's error, never `invalid_cursor`.
+    lo, hi = _slack_ts(_param(request, "oldest")), _slack_ts(_param(request, "latest"))
+    if hi is False:
+        return _err("invalid_ts_latest")
+    if lo is False:
+        return _err("invalid_ts_oldest")
     offset = decode_cursor_or_none(_param(request, "cursor"))
     if offset is None:
         return _err("invalid_cursor")
-    # Slack history returns only top-level messages (thread roots + standalone);
-    # replies live under conversations.replies.
-    lo, hi = _slack_ts(_param(request, "oldest")), _slack_ts(_param(request, "latest"))
-    if lo is False:
-        return _err("invalid_ts_oldest")
-    if hi is False:
-        return _err("invalid_ts_latest")
     if lo is not None or hi is not None:  # time-bounded (e.g. a single day): filter, then paginate
         inclusive = _param(request, "inclusive") in ("1", "true", "True")
 
