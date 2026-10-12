@@ -333,9 +333,9 @@ def test_s3_a_head_at_the_service_root_is_the_405_without_its_body(live_server, 
     assert _signed(base_url, path, settings.admin_token).status_code == 200
 
 
-# The queries real answered alike at `/{bucket}` and `/{bucket}/`, on a GET and on a HEAD: the same
-# status, header names and body once the request ids are set aside (s3.amazonaws.com, us-east-1,
-# 2026-10-11).
+# The queries real answered alike at a bucket's path with and without a trailing slash, on a GET
+# and on a HEAD: the same status, header names and body once the request ids are set aside
+# (s3.amazonaws.com, us-east-1, 2026-10-11).
 _BUCKET_QUERIES = [
     "",
     "?list-type=2",
