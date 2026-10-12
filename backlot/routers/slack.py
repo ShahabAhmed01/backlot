@@ -611,7 +611,9 @@ async def conversations_history(request: Request):
     # answer in that order: measured against slack.com/api on 2026-10-10, `oldest=abc&latest=abc`
     # answers `invalid_ts_latest`, and an unreadable timestamp beside an undecodable cursor answers
     # the timestamp's error, never `invalid_cursor`. On 2026-10-12 the same answers came back with
-    # the three in every query order, and in a POST form body.
+    # the three in every query order, and in a POST form body; an empty `latest` or `oldest` was
+    # read as none, leaving `invalid_cursor` beside an undecodable cursor; and a channel that names
+    # nothing answered `channel_not_found` ahead of all three.
     if hi is False:
         return _err("invalid_ts_latest")
     if lo is False:

@@ -502,6 +502,10 @@ def test_slack_rejects_an_invalid_cursor(client, admin_h, path):
         ({"oldest": "abc", "latest": "inf"}, "invalid_ts_latest"),
         ({"oldest": "inf", "latest": "abc"}, "invalid_ts_latest"),
         ({"oldest": "nan", "cursor": "zzz"}, "invalid_ts_oldest"),
+        # An empty timestamp is none, and a channel that names nothing is answered first.
+        ({"latest": "", "cursor": "zzz"}, "invalid_cursor"),
+        ({"oldest": "", "cursor": "zzz"}, "invalid_cursor"),
+        ({"channel": "C00000000", "latest": "abc", "cursor": "zzz"}, "channel_not_found"),
     ],
 )
 def test_slack_history_names_the_first_error_real_would(client, admin_h, params, error):
