@@ -73,8 +73,10 @@ def test_slack_users_info_resolves_author(client, admin_h, ro_conn):
 #   curl -H "Authorization: Bearer xoxb-not-a-real-token" .../conversations.list -> invalid_auth
 #   curl                                                  .../conversations.list -> not_authed
 # A merely UNKNOWN token answers the same as a malformed one, so the only thing that decides it is
-# whether a credential was presented — and Slack recognises exactly three ways to present one: an
-# `Authorization: Bearer` header, a `token` query param, or a `token` form field. Every row is a
+# whether a credential was presented — and Slack recognises two ways to present one: an
+# `Authorization: Bearer` header or a `token` form field. The `token` query parameter is a channel
+# it refuses for apps created after February 24, 2021 (the refusal test below covers that), so a
+# request carrying one is a refused credential rather than a missing one. Every row is a
 # live answer, including the ones that read as though they should go the other way.
 @pytest.mark.parametrize(
     "kwargs, error",
@@ -159,6 +161,116 @@ def test_slack_auth_error_split_is_uniform_across_methods(client):
         assert client.post(f"/slack/api/{path}", headers=bogus).json()["error"] == (
             "invalid_auth"
         ), path
+
+
+def test_slack_refuses_a_token_query_parameter(client, tokens_yaml):
+    """The `token` query parameter is a channel real Slack refuses for an app created after
+    February 24, 2021, and Backlot is such an app — `auth.slack_query_token_refused` records
+    the measurement this replays: a NON-EMPTY query token is `invalid_auth` whatever else the
+    request carries — GET or POST, on auth.test, conversations.list, users.list and
+    search.messages, and a valid bearer header or form field does not rescue it — and an EMPTY
+    one is `invalid_auth` beside a bearer header and `not_authed` on its own. Slack's changelog
+    ("No more tokens in querystrings for newly created apps", docs.slack.dev, November 1, 2020)
+    says existing apps keep query-string tokens, so the refusal is what an app created now gets,
+    which is the only kind anyone can create anymore."""
+    valid = tokens_yaml["admin_token"]
+    bogus = "xoxb-not-a-real-token"
+    # (method, path, query, headers, form, error)
+    rows = [
+        # a non-empty query token is refused on every method measured, alone or beside a header
+        ("get", "auth.test", {"token": valid}, None, None, "invalid_auth"),
+        ("post", "auth.test", {"token": valid}, None, None, "invalid_auth"),
+        ("post", "auth.test", {"token": valid}, None, {"x": "1"}, "invalid_auth"),
+        ("get", "conversations.list", {"token": valid, "limit": 1}, None, None, "invalid_auth"),
+        ("get", "users.list", {"token": valid, "limit": 1}, None, None, "invalid_auth"),
+        ("get", "search.messages", {"token": valid, "query": "the"}, None, None, "invalid_auth"),
+        # a bearer header does not rescue it — valid or bogus — and neither does a form field
+        (
+            "get",
+            "auth.test",
+            {"token": valid},
+            {"Authorization": f"Bearer {valid}"},
+            None,
+            "invalid_auth",
+        ),
+        (
+            "get",
+            "auth.test",
+            {"token": bogus},
+            {"Authorization": f"Bearer {valid}"},
+            None,
+            "invalid_auth",
+        ),
+        (
+            "get",
+            "auth.test",
+            {"token": valid},
+            {"Authorization": f"Bearer {bogus}"},
+            None,
+            "invalid_auth",
+        ),
+        ("post", "auth.test", {"token": bogus}, None, {"token": valid}, "invalid_auth"),
+        # an empty `token=` beside a bearer header is refused; on its own it is no credential
+        (
+            "get",
+            "auth.test",
+            {"token": ""},
+            {"Authorization": f"Bearer {valid}"},
+            None,
+            "invalid_auth",
+        ),
+        ("get", "auth.test", {"token": ""}, None, None, "not_authed"),
+        # a bogus query token draws the same refusal as a valid one
+        ("get", "auth.test", {"token": bogus}, None, None, "invalid_auth"),
+    ]
+    for method, path, query, headers, form, error in rows:
+        kwargs = {"params": query, "headers": headers}
+        if form is not None:
+            kwargs["data"] = form
+        r = getattr(client, method)(f"/slack/api/{path}", **kwargs)
+        assert r.json() == {"ok": False, "error": error}, (method, path, query, headers, form)
+
+
+def test_slack_reads_a_form_token_ahead_of_the_bearer_header(client, tokens_yaml, tokens):
+    """Real reads the `token` form field first and the bearer header second, where the header
+    came first here; a request carrying two different tokens is a misconfiguration, but the
+    answer still says whose credential was used.
+
+    The measurement — the same token and day `auth.slack_query_token_refused` records — is: a
+    bogus header beside a valid form token answers the form token's caller, a valid header beside
+    a bogus form token answers `invalid_auth`, and an empty `token=` form field is ignored, the
+    header's token used. `auth.test` is the probe because it names the caller, so a row with the
+    same token in both places cannot tell the two orders apart; the ones with a person's token in
+    one place and the admin token in the other can, and both directions are here."""
+    admin = tokens_yaml["admin_token"]
+    ava = tokens["ava@acme.com"]
+    bogus = "xoxb-not-a-real-token"
+    # (headers, form, ok, who) — who is the user_id auth.test answers, or the error name
+    rows = [
+        # the form field wins whatever the header holds, in both directions
+        ({"Authorization": f"Bearer {bogus}"}, {"token": admin}, True, "USERVICE0"),
+        (
+            {"Authorization": f"Bearer {admin}"},
+            {"token": ava},
+            True,
+            synth.slack_user_id("ava@acme.com"),
+        ),
+        ({"Authorization": f"Bearer {ava}"}, {"token": admin}, True, "USERVICE0"),
+        ({"Authorization": f"Bearer {admin}"}, {"token": bogus}, False, "invalid_auth"),
+        # an empty form field is no credential: the header's token is read beside it, and with no
+        # header there is nothing left
+        ({"Authorization": f"Bearer {admin}"}, {"token": ""}, True, "USERVICE0"),
+        (None, {"token": ""}, False, "not_authed"),
+        # the two channels that stay accepted, each alone
+        (None, {"token": admin}, True, "USERVICE0"),
+        ({"Authorization": f"Bearer {ava}"}, None, True, synth.slack_user_id("ava@acme.com")),
+    ]
+    for headers, form, ok, who in rows:
+        j = client.post("/slack/api/auth.test", headers=headers, data=form).json()
+        if ok:
+            assert j["ok"] is True and j["user_id"] == who, (headers, form)
+        else:
+            assert j == {"ok": False, "error": who}, (headers, form)
 
 
 def test_slack_auth_test_identifies_the_caller(client, admin_h, tokens):

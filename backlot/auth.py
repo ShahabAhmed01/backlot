@@ -168,15 +168,41 @@ def slack_bearer_token(request: Request) -> str | None:
 
 
 def slack_token(request: Request) -> str | None:
-    """Slack accepts the token as a bearer header, query param, or form field. The official
-    slack-go SDK (and Slack's own clients) post it as the ``token`` form field, so fall back to
-    the form stashed on ``request.state._form`` by the slack-form middleware.
+    """The token a Slack request carries in a channel real Slack still accepts: the ``token``
+    form field — where the official slack-go SDK and Slack's own clients put it, stashed on
+    ``request.state._form`` by the slack-form middleware — read ahead of the ``Authorization:
+    Bearer`` header, which is the order real reads them in.
+
+    The ``token`` query parameter is not one of them: real Slack closed that channel for an app
+    created after February 24, 2021 — a non-empty value is refused, an empty one beside a bearer
+    header is too — so it never authenticates here either;
+    :func:`slack_query_token_refused` carries that half of the rule.
 
     Both names are case-sensitive too: ``?TOKEN=`` and a ``TOKEN`` form field are ``not_authed``
     live, which the exact-key lookups below already answer."""
     form = getattr(request.state, "_form", None)
     form_field = form.get("token") if form else None
-    return slack_bearer_token(request) or request.query_params.get("token") or form_field
+    return form_field or slack_bearer_token(request)
+
+
+def slack_query_token_refused(request: Request) -> bool:
+    """Whether the request carries its token as a ``token`` query parameter, which real Slack
+    refuses for an app created after February 24, 2021, and Backlot answers for.
+
+    Measured against slack.com/api on 2026-10-11 with the user token of an app created on
+    2026-09-17, one request per row: a NON-EMPTY query token is ``invalid_auth`` on every method
+    tried — auth.test over GET and POST, conversations.list, users.list, search.messages —
+    alone or beside a bearer header or a form field, valid or bogus; and an EMPTY one is
+    ``invalid_auth`` beside a bearer header and ``not_authed`` on its own. Slack's changelog
+    ("No more tokens in querystrings for newly created apps", docs.slack.dev, November 1, 2020)
+    says existing apps keep query-string tokens and apps created after the date may no longer
+    send them, so the refusal is what an app created now gets, which is what Backlot is.
+
+    The bearer half of the condition is what the empty-beside-a-header row needs: the header's
+    own token would resolve, so without it the request would authenticate where real refuses it."""
+    if "token" not in request.query_params:
+        return False
+    return request.query_params["token"] != "" or slack_bearer_token(request) is not None
 
 
 def resolve_bearer(request: Request) -> Caller | None:
