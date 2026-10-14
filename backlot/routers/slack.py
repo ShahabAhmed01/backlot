@@ -158,30 +158,26 @@ def _caller_or_error(request: Request) -> tuple[Caller | None, dict | None]:
 
     Measured against the live API: a token that is merely unknown answers the same as a malformed
     one, so "malformed" is not a category this has to recognise — what matters is only whether a
-    credential was presented at all, and Slack recognises two ways to present one: an
-    `Authorization: Bearer <t>` header or a `token` form field, the form field read first. The
-    `token` query parameter is a channel Slack closed for an app created after February 24,
-    2021 — measured against slack.com/api on 2026-10-11, with an app created on 2026-09-17 — so
-    a non-empty one is refused whatever else the request holds, and an empty one is refused
-    beside a bearer header and is no credential on its own.
+    credential was presented at all, and Slack recognises two ways to present one: a `token` form
+    field, read first, and an `Authorization: Bearer <t>` header (`auth.slack_token`). A `token`
+    query parameter is answered before either is resolved, by the rule
+    `auth.slack_query_token_refused` records.
 
-        no header, no `token` param      -> not_authed
-        `Authorization: Bearer ` (empty) -> not_authed
-        `token=` (empty) on its own      -> not_authed
-        any other header scheme          -> not_authed
-        any non-empty token that fails   -> invalid_auth
-        a non-empty `token` query param   -> invalid_auth
-        `token=` beside a bearer header  -> invalid_auth
+        no credential, no `token` query param       -> not_authed
+        `Authorization: Bearer ` (empty)            -> not_authed
+        `token=` (empty) on its own                 -> not_authed
+        any other header scheme                     -> not_authed
+        any non-empty token that fails              -> invalid_auth
+        a non-empty `token` query param             -> invalid_auth
+        an empty `token` query param + a credential -> invalid_auth
 
     "any other header scheme" is the whole of the rest, not just the obvious `Basic`: the scheme is
     case-SENSITIVE live, so `bearer` and `BEARER` land here too, as does GitHub's legacy `token <t>`
     form. `auth.slack_bearer_token` is what draws that line, and is deliberately not the shared
     `auth.bearer_token` — see its docstring for why the two cannot be one parser.
 
-    ``auth.slack_token`` never reads the query: it returns None for every way the first group
-    arises — an unrecognised scheme parses to nothing, an empty form value is falsy — and the
-    `token` query parameter is :func:`auth.slack_query_token_refused`'s to answer, before anything
-    is resolved.
+    ``auth.slack_token`` returns None for every case in the first group: an unrecognised scheme
+    parses to nothing, and an empty form value is falsy.
 
     A resolved token whose person a roster marks ``deactivated: true`` is answered Slack's own
     ``account_inactive`` instead of the caller it would otherwise resolve to; this is the one place
