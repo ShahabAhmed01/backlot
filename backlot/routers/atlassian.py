@@ -456,10 +456,11 @@ async def jira_project_role(key: str, role_id: int, request: Request):
 
 
 # The `SearchAndReconcileRequestBean` fields real's POST form accepts, measured 2026-09-18 against
-# Jira Cloud: `fields`, `fieldsByKeys`, `expand`, `properties` and `reconcileIssues` are all read
-# without a refusal, alongside the three Backlot itself acts on. Backlot implements
-# none of the five, the same gap `_P_EXPAND`'s comment notes for the comment read, but they must
-# stay off the unknown-property refusal below or that refusal would catch a client using them.
+# Jira Cloud (`failFast` 2026-10-12): `fields`, `fieldsByKeys`, `failFast`, `expand`, `properties`
+# and `reconcileIssues` are all read without a refusal, alongside the three Backlot itself acts on.
+# Backlot implements none of the six, the same gap `_P_EXPAND`'s comment notes for the comment
+# read, but they must stay off the unknown-property refusal below or that refusal would catch a
+# client using them.
 _JIRA_SEARCH_BODY_KEYS = frozenset(
     {
         "jql",
@@ -467,6 +468,7 @@ _JIRA_SEARCH_BODY_KEYS = frozenset(
         "nextPageToken",
         "fields",
         "fieldsByKeys",
+        "failFast",
         "expand",
         "properties",
         "reconcileIssues",
@@ -536,12 +538,13 @@ def _jira_search_max_results(value) -> int:
 _JIRA_BOOLEAN_TEXTS = frozenset({"", "null", "true", "True", "TRUE", "false", "False", "FALSE"})
 
 
-def _jira_fields_by_keys_ok(value) -> bool:
-    """Whether a `fieldsByKeys` binds to the bean's boolean, the way Jira Cloud bound it on
-    2026-10-10 and 2026-10-11. `null`, a boolean and any integer bind. A string binds when, trimmed
-    (see :data:`_JAVA_TRIMMED`), it is empty, `null`, or `true` or `false` in lower, title or upper
-    case: `" TRUE "`, `"False"`, `""` and `"null"` bind, where `"tRuE"`, `"NULL"`, `"1"`, `"yes"`
-    and a `true` behind a no-break space do not. A float, a list and an object do not bind.
+def _jira_bean_boolean_ok(value) -> bool:
+    """Whether a `fieldsByKeys` or a `failFast` binds to the bean's boolean. Jira Cloud bound
+    `fieldsByKeys` this way on 2026-10-10 and 2026-10-11, and the two alike, value for value, on
+    2026-10-13. `null`, a boolean and any integer bind. A string binds when, trimmed (see
+    :data:`_JAVA_TRIMMED`), it is empty, `null`, or `true` or `false` in lower, title or upper case:
+    `" TRUE "`, `"False"`, `""` and `"null"` bind, where `"tRuE"`, `"NULL"`, `"1"`, `"yes"` and a
+    `true` behind a no-break space do not. A float, a list and an object do not bind.
     """
     if value is None or isinstance(value, int):
         return True
@@ -623,15 +626,18 @@ async def jira_search(request: Request):
             # an object is a body-wide invalid-payload refusal (measured 2026-10-06; the lists of
             # scalars and the bare string 2026-10-09).
             raise errors_atlassian.body_not_read(errors_atlassian.BODY_NOT_AN_OBJECT)
-        # The four members Backlot does not act on still have their values bound by the bean
-        # (measured 2026-10-10 and 2026-10-11): `expand` takes a scalar, `properties` a list of
-        # scalars, `reconcileIssues` a list of what `_jira_reconcile_issue_ok` accepts, and
-        # `fieldsByKeys` what `_jira_fields_by_keys_ok` accepts. Anything else is the body-wide
-        # refusal, which real gives ahead of the 500s a null `properties` element and a null
-        # `reconcileIssues` draw further down.
+        # The other five members Backlot does not act on still have their values bound by the bean
+        # (measured 2026-10-10 and 2026-10-11, `failFast` 2026-10-13): `expand` takes a scalar,
+        # `properties` a list of scalars, `reconcileIssues` a list of what
+        # `_jira_reconcile_issue_ok` accepts, and `fieldsByKeys` and `failFast` what
+        # `_jira_bean_boolean_ok` accepts. Anything else is the body-wide refusal, which real gives
+        # ahead of the 500s a null `properties` element and a null `reconcileIssues` draw further
+        # down.
         if isinstance(body.get("expand"), (list, dict)):
             raise errors_atlassian.body_not_read(errors_atlassian.BODY_NOT_AN_OBJECT)
-        if not _jira_fields_by_keys_ok(body.get("fieldsByKeys")):
+        if not _jira_bean_boolean_ok(body.get("fieldsByKeys")):
+            raise errors_atlassian.body_not_read(errors_atlassian.BODY_NOT_AN_OBJECT)
+        if not _jira_bean_boolean_ok(body.get("failFast")):
             raise errors_atlassian.body_not_read(errors_atlassian.BODY_NOT_AN_OBJECT)
         raw_properties = body.get("properties")
         if raw_properties is not None and (
@@ -657,17 +663,30 @@ async def jira_search(request: Request):
             raise errors_atlassian.properties_null_element(raw_properties.index(None))
         token = raw_token
         reconcile_null = "reconcileIssues" in body and raw_reconcile is None
+        reconcile_count = len(raw_reconcile) if isinstance(raw_reconcile, list) else 0
     else:
         jql = _str_param(request, "jql") or ""
         max_results_sent = _jira_max_results_was_sent(request)
         limit = _int_param(request, "maxResults", default_size)
+        # Each conversion is refused ahead of the page token, the range and the unbounded JQL:
+        # `maxResults` first, then `fieldsByKeys`, then `failFast`, then `reconcileIssues`,
+        # whichever order the query sends them in (measured 2026-10-12).
+        _bool_param(request, "fieldsByKeys")
+        _bool_param(request, "failFast")
+        _jira_long_list_param(request, "reconcileIssues")
         token = _str_param(request, "nextPageToken")
         reconcile_null = False
+        reconcile_count = len(request.query_params.getlist("reconcileIssues"))
     # An undecodable token is refused before the project clause is resolved (measured
     # 2026-09-16; see test_jira_search_refuses_a_page_token_it_cannot_decode).
     offset = decode_cursor_or_none(None if token is None else str(token))
     if offset is None:
         raise errors_atlassian.bad_page_token()
+    if reconcile_count > 50:
+        # Real counts every value it was sent, a blank one on GET and a null element on POST
+        # included, and answers this after the page token and ahead of the range and the unbounded
+        # JQL (measured 2026-10-12, the null elements 2026-10-13).
+        raise errors_atlassian.reconcile_issues_too_many()
     if max_results_sent and not (
         _JIRA_SEARCH_MAX_RESULTS_RANGE[0] <= limit <= _JIRA_SEARCH_MAX_RESULTS_RANGE[1]
     ):
@@ -2146,6 +2165,67 @@ def _int_param(
         # flowed into the query where real answered 400.
         raise errors_atlassian.integer_conversion_failure(_echoed_path(request), name, values)
     return n
+
+
+# The words `_bool_param` reads, and the value each one stands for.
+_JIRA_QUERY_BOOLEANS = {
+    "true": True,
+    "on": True,
+    "yes": True,
+    "1": True,
+    "false": False,
+    "off": False,
+    "no": False,
+    "0": False,
+}
+
+
+def _bool_param(request: Request, name: str, default: bool | None = None) -> bool | None:
+    """One query parameter as a boolean, read the way Jira reads `search/jql`'s `fieldsByKeys` and
+    `failFast` (Jira Cloud, 2026-10-12 and 2026-10-13).
+
+    The first value is the one read. What Java's `String.trim` removes comes off it, every character
+    up to U+0020 at either end (`%01true` is read), and no character past U+0020 does (`%C2%A0true`
+    and `%E2%80%80true` are refused). What is left matches a key of :data:`_JIRA_QUERY_BOOLEANS` in
+    any case, compared the way Java's `equalsIgnoreCase` compares, which also reads `ſ` (U+017F) as
+    `s`. A lone empty value is the default. A value the trim empties is refused (`%20`, `%01`), and
+    so is an empty first value of a repeated parameter (`?fieldsByKeys=&fieldsByKeys=yes`).
+    """
+    values = request.query_params.getlist(name)
+    if not values or values == [""]:
+        return default
+    word = values[0].strip(_JAVA_TRIMMED).lower().replace("\u017f", "s")
+    if word not in _JIRA_QUERY_BOOLEANS:
+        raise errors_atlassian.integer_conversion_failure(_echoed_path(request), name, values)
+    return _JIRA_QUERY_BOOLEANS[word]
+
+
+def _jira_long_list_param(request: Request, name: str) -> list[int]:
+    """Every value of a repeated query parameter as a Java `long`, as Jira converts the
+    `reconcileIssues` of a `search/jql` GET (Jira Cloud, 2026-10-12).
+
+    `?reconcileIssues=1&reconcileIssues=2` is served, and a value that will not convert is refused
+    wherever it sits: `1&a` names the array as `a&1` does, where :func:`_int_param` reads the first
+    value alone. A value :func:`errors_atlassian.strip_java_whitespace` empties is passed over, as
+    in `?reconcileIssues=%20&reconcileIssues=1`. The rest convert by :func:`_int_param`'s rules, so
+    `1,2` is refused rather than split.
+    """
+    values = request.query_params.getlist(name)
+    numbers = []
+    for raw in values:
+        cleaned = errors_atlassian.strip_java_whitespace(raw)
+        if cleaned == "":
+            continue
+        try:
+            if "_" in cleaned or any(ch.isspace() for ch in cleaned):
+                raise ValueError(cleaned)
+            n = int(cleaned)
+        except ValueError:
+            n = None
+        if n is None or not JAVA_LONG[0] <= n <= JAVA_LONG[1]:
+            raise errors_atlassian.integer_conversion_failure(_echoed_path(request), name, values)
+        numbers.append(n)
+    return numbers
 
 
 def _reject_json_constant(value: str):

@@ -24,7 +24,7 @@ import json
 import re
 from xml.sax.saxutils import escape
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 PREFIX = "/atlassian"
 WIKI = f"{PREFIX}/wiki"
@@ -187,7 +187,8 @@ def _instance(path: str) -> str:
 
 
 def integer_conversion_failure(path: str, name: str, values: list[str]) -> AtlassianError:
-    """The 400 either product answers for a query parameter it cannot read as an ``int``.
+    """The 400 either product answers for a query parameter it cannot read as an ``int``, which
+    Jira also answers for one it cannot read as a boolean.
 
     Measured on brekkylab.atlassian.net, 2026-09-14, on `GET /rest/api/3/issue/{key}/comment` and
     `GET /wiki/rest/api/space`. The two bodies share no key: Jira's is RFC 7807 naming the
@@ -533,7 +534,7 @@ def refuse_a_media_type(
     Spring's check, and the first thing the operation does: ahead of the 401 a caller with no
     credential gets (:data:`JIRA_UNAUTHENTICATED`) and of the operation itself for one whose
     credential resolves, and behind the gateway's Connect-token 403. Measured on Jira Cloud on
-    2026-09-30, on the operations ``backlot/data/jira_unserved.json`` lists:
+    2026-09-30, on the operations ``backlot/data/jira_unserved.json`` listed that day:
 
     - the media type is compared without its parameters and whatever its case, and a type only a
       wildcard would cover (`application/*`, `*/*`, `*`) is refused where the operation does not
@@ -654,6 +655,18 @@ def reconcile_issues_null() -> AtlassianError:
             "message": 'Cannot invoke "java.util.List.stream()" because "reconcileIssues" is null',
             "status-code": 500,
             "stack-trace": "",
+        },
+        media_type=JIRA_JSON_MEDIA_TYPE,
+    )
+
+
+def reconcile_issues_too_many() -> AtlassianError:
+    """Jira's 400 for more than 50 `reconcileIssues`, measured 2026-10-12 on both GET and POST."""
+    return AtlassianError(
+        400,
+        {
+            "errorMessages": ["The max number of issues to reconcile is 50."],
+            "errors": {},
         },
         media_type=JIRA_JSON_MEDIA_TYPE,
     )
@@ -970,9 +983,9 @@ CONFLUENCE_SEARCH_OPTIONS_ALLOW = "OPTIONS,HEAD,GET"
 _CONFLUENCE_HEAD_NO_LENGTH = "/wiki/rest/api/search"
 
 
-def head_content_length(path: str, status_code: int) -> bool:
-    """Whether a `HEAD` at ``path`` declares the length of the body its `GET` would have carried,
-    as real does.
+def head_content_length(request: Request, status_code: int) -> bool:
+    """Whether real Jira or Confluence puts a `content-length` on a `HEAD` to this request's path
+    that answers ``status_code``.
 
     Measured with `curl -I` beside each `GET` the same minute. Confluence, 2026-09-22: every 200 but
     `search` declares it, to the byte (`space` 1103, `content` 1536, `content/{id}` 3909,
@@ -982,6 +995,7 @@ def head_content_length(path: str, status_code: int) -> bool:
     credential with (:data:`JIRA_UNAUTHENTICATED`), which declares its 53 bytes, and the `HEAD`
     beside it declares the same (`myself`, 2026-09-30).
     """
+    path = request.url.path
     if not is_confluence(path):
         return status_code == 401
     if _instance(path) == _CONFLUENCE_HEAD_NO_LENGTH:

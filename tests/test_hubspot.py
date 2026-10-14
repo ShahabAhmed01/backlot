@@ -113,6 +113,8 @@ def test_hubspot_archived_parameter_reads_its_first_value_and_only_true_as_true(
     [
         ("meetings", "0-47 (MEETING_EVENT)"),
         ("meeting", "0-47 (MEETING_EVENT)"),
+        ("Meetings", "0-47 (MEETING_EVENT)"),
+        ("MEETING", "0-47 (MEETING_EVENT)"),
         ("0-47", "0-47 (MEETING_EVENT)"),
         ("communications", "0-18 (COMMUNICATION)"),
         ("communication", "0-18 (COMMUNICATION)"),
@@ -371,12 +373,15 @@ def test_hubspot_one_type_stated_both_ways_is_one_type(tmp_path):
                 assert c.get(f"/hubspot/crm/v3/objects/{asked}/{rid}", headers=h).status_code == 200
 
 
-@pytest.mark.parametrize("asked", ["companies", "company"])
+@pytest.mark.parametrize(
+    "asked", ["companies", "company", "Companies", "COMPANY", "companie\u017f", "compan\u0131es"]
+)
 def test_hubspot_a_standard_type_answers_to_either_spelling(client, admin_h, asked):
     """HubSpot resolves the path segment through its object-type registry, so `/objects/company`
     reaches the same records as `/objects/companies` — measured: both answer 403 MISSING_SCOPES on
     a scope-less key, where an unrecognized word answers 400. A corpus states one spelling or the
-    other, and neither may hide its records from the vendor's own path."""
+    other, and neither may hide its records from the vendor's own path. Either is read in upper
+    case on each route, as `_canonical` records."""
     listed = client.get(
         f"/hubspot/crm/v3/objects/{asked}", headers=admin_h, params={"limit": 100}
     ).json()["results"]
@@ -390,6 +395,16 @@ def test_hubspot_a_standard_type_answers_to_either_spelling(client, admin_h, ask
     one = listed[0]["id"]
     assert client.get(f"/hubspot/crm/v3/objects/{asked}/{one}", headers=admin_h).status_code == 200
     assert client.get(f"/hubspot/crm/v3/objects/tickets/{one}", headers=admin_h).status_code == 404
+    for route, body in (
+        ("search", {"limit": 100}),
+        ("batch/read", {"inputs": [{"id": r["id"]} for r in listed]}),
+    ):
+        spelt = client.post(f"/hubspot/crm/v3/objects/{asked}/{route}", headers=admin_h, json=body)
+        plural = client.post(
+            f"/hubspot/crm/v3/objects/companies/{route}", headers=admin_h, json=body
+        )
+        assert spelt.status_code == plural.status_code == 200, route
+        assert spelt.json() == plural.json(), route
 
 
 def test_hubspot_standard_type_with_no_records_is_an_empty_page(client, admin_h):
@@ -462,6 +477,69 @@ def test_hubspot_associations_v4(client, admin_h):
     assert isinstance(assoc["toObjectId"], int)
     assert assoc["associationTypes"][0]["category"] == "HUBSPOT_DEFINED"
     assert assoc["associationTypes"][0]["label"] == "Primary"
+
+
+@pytest.fixture
+def ava(client, admin_h):
+    """The contact Ava's id. She is associated with one company."""
+    listed = client.get(
+        "/hubspot/crm/v3/objects/contacts", headers=admin_h, params={"limit": 100}
+    ).json()["results"]
+    return next(r for r in listed if r["properties"].get("firstname") == "Ava")["id"]
+
+
+def _assoc(record, to="companies", source="contacts"):
+    return f"/crm/v4/objects/{source}/{record}/associations/{to}"
+
+
+def _cannot_infer(name):
+    return {"status": "error", "message": f"Unable to infer object type from: {name}"}
+
+
+_EMPTY = {"results": []}
+_NOT_FOUND = {"status": "error", "message": "resource not found", "category": "OBJECT_NOT_FOUND"}
+
+
+@pytest.mark.parametrize(
+    ("path", "status", "want"),
+    [
+        ("/crm/v3/objects/nosuch/{ava}", 400, _cannot_infer("nosuch")),
+        ("/crm/v3/objects/tas\u212as", 400, _cannot_infer("tas\u212as")),
+        (_assoc("{ava}", to="company"), 200, _assoc("{ava}")),
+        (_assoc("{ava}", to="0-2"), 200, _assoc("{ava}")),
+        (_assoc("{ava}", to="COMPANIES", source="Contacts"), 200, _assoc("{ava}")),
+        (_assoc("{ava}", to="nosuch"), 400, _cannot_infer("nosuch")),
+        (_assoc("{ava}", source="nosuch"), 400, _cannot_infer("nosuch")),
+        (_assoc("{ava}", to="nosuchtwo", source="nosuchone"), 400, _cannot_infer("nosuchone")),
+        (_assoc("1"), 200, _EMPTY),
+        (_assoc("9223372036854775807"), 200, _EMPTY),
+        (_assoc("0" * 25 + "1"), 200, _EMPTY),
+        (_assoc("{ava}", source="deals"), 200, _EMPTY),
+        (_assoc("abc"), 404, _NOT_FOUND),
+        (_assoc("1.0"), 404, _NOT_FOUND),
+        (_assoc("\u0661"), 404, _NOT_FOUND),
+        (_assoc("0"), 404, _NOT_FOUND),
+        (_assoc("-1"), 404, _NOT_FOUND),
+        (_assoc("9223372036854775808"), 404, _NOT_FOUND),
+        (_assoc("abc") + "?after=bogus", 404, _NOT_FOUND),
+        (_assoc("1") + "?after=bogus", 400, _assoc("{ava}") + "?after=bogus"),
+        (_assoc("{ava}", source="deals") + "?after=bogus", 400, _assoc("{ava}") + "?after=bogus"),
+    ],
+)
+def test_hubspot_object_types_resolve_as_real_resolves_them(
+    client, admin_h, ava, path, status, want
+):
+    """Each row is one that `_canonical`, `get_object` and `list_associations` record as measured.
+    Where `want` is a path, the row answers what that path does, here and on real: the target under
+    its plural, for another spelling of it; and Ava's own associations, for a bad `after`, since the
+    cursor is refused before a missing or mismatched record is an empty page."""
+    r = client.get("/hubspot" + path.format(ava=ava), headers=admin_h)
+    assert r.status_code == status, path
+    if isinstance(want, str):
+        twin = client.get("/hubspot" + want.format(ava=ava), headers=admin_h).json()
+        assert twin != _EMPTY
+        want = twin
+    assert r.json() == want
 
 
 def test_hubspot_search_filter_groups(client, admin_h):
@@ -1048,6 +1126,102 @@ def test_hubspot_batch_read_refuses_a_body_real_cannot_read(
     headers = {"Content-Type": "application/json", **(admin_h if authed else {})}
     url = f"/hubspot/crm/v3/objects/{object_type}/batch/read"
     r = client.post(url, headers=headers, content=raw.encode())
+    if isinstance(want, dict):
+        assert (r.status_code, r.json()) == (400, want)
+    else:
+        assert r.status_code == want
+
+
+def _token_refusal(column: int, token: str, line: int = 1) -> dict:
+    return {
+        "status": "error",
+        "message": f"Invalid input JSON on line {line}, column {column}: Non-standard token "
+        f"'{token}': enable `JsonReadFeature.ALLOW_NON_NUMERIC_NUMBERS` to allow",
+    }
+
+
+def _nt(id, route, raw, want, object_type="companies", authed=True):
+    return pytest.param(route, raw, want, object_type, authed, id=id)
+
+
+_A_FILTER = '{"filterGroups":[{"filters":[{"propertyName":"name","operator":"EQ","value":%s}]}]}'
+_AN_OPERATOR = '"filterGroups":[{"filters":[{"propertyName":"name","operator":%s,"value":"x"}]}]'
+
+# fmt: off
+_TOKEN_ROWS = [
+    _nt("inputs", "batch/read", '{"inputs":NaN}', _token_refusal(14, "NaN")),
+    _nt("an-input", "batch/read", '{"inputs":[NaN]}', _token_refusal(15, "NaN")),
+    _nt("an-input-infinity", "batch/read", '{"inputs":[Infinity]}', _token_refusal(20, "Infinity")),
+    _nt("an-input-minus-infinity", "batch/read", '{"inputs":[-Infinity]}', _token_refusal(21, "-Infinity")),
+    _nt("properties", "batch/read", _ONE + '"properties":NaN}', _token_refusal(40, "NaN")),
+    _nt("an-id-in-an-input", "batch/read", '{"inputs":[{"id":NaN}]}', _token_refusal(21, "NaN")),
+    _nt("an-unknown-member", "batch/read", '{"bogus":NaN}', _token_refusal(13, "NaN")),
+    _nt("limit", "search", '{"limit":NaN}', _token_refusal(13, "NaN")),
+    _nt("limit-infinity", "search", '{"limit":Infinity}', _token_refusal(18, "Infinity")),
+    _nt("after", "search", '{"after":NaN}', _token_refusal(13, "NaN")),
+    _nt("a-filter-value", "search", _A_FILTER % "NaN", _token_refusal(80, "NaN")),
+    _nt("filter-groups", "search", '{"filterGroups":NaN}', _token_refusal(20, "NaN")),
+    _nt("filters", "search", '{"filterGroups":[{"filters":NaN}]}', _token_refusal(32, "NaN")),
+    _nt("contacts", "search", '{"limit":NaN}', _token_refusal(13, "NaN"), object_type="contacts"),
+    _nt("a-bare-token", "search", "NaN", _token_refusal(4, "NaN")),
+    _nt("a-bare-minus-infinity", "batch/read", "-Infinity", _token_refusal(10, "-Infinity")),
+    # the position, counted as `_token_at` counts one
+    _nt("lf", "search", '{\n"limit":NaN}', _token_refusal(12, "NaN", line=2)),
+    _nt("crlf", "search", '{\r\n"limit":NaN}', _token_refusal(12, "NaN", line=2)),
+    _nt("tab", "search", '{\t"limit":NaN}', _token_refusal(14, "NaN")),
+    _nt("two-byte-char-before", "search", '{"query":"é","limit":NaN}', _token_refusal(26, "NaN")),
+    _nt("three-and-four-byte-chars-before", "search", '{"query":"' + chr(0x20AC) + chr(0x1F600) + '","limit":NaN}', _token_refusal(31, "NaN")),
+    _nt("escaped-char-before", "search", '{"query":"\\u00e9","limit":NaN}', _token_refusal(30, "NaN")),
+    _nt("spelled-in-a-string-before", "search", '{"query":"a\\"NaN","limit":NaN}', _token_refusal(30, "NaN")),
+    _nt("repeated-key", "search", '{"limit":5,"limit":NaN}', _token_refusal(23, "NaN")),
+    # UTF-16, and a byte that does not decode behind the token: the text ahead of it is scanned
+    _nt("utf-16", "search", '{"limit":NaN}'.encode("utf-16-be"), _token_refusal(13, "NaN")),
+    _nt("a-byte-that-does-not-decode-behind", "search", b'{"limit":NaN,"query":"\xff"}', _token_refusal(13, "NaN")),
+    _nt("a-byte-order-mark-and-a-byte-that-does-not-decode", "batch/read", b'\xef\xbb\xbf{\n"inputs":[NaN,"\xff"]}', _token_refusal(14, "NaN", line=2)),
+    # the token and a value real refuses for its type: whichever starts first is named
+    _nt("inputs-ahead", "batch/read", '{"inputs":"x","properties":NaN}', _batch_refusal(11, _not_a_list("String", "VALUE_STRING"))),
+    _nt("inputs-behind", "batch/read", '{"properties":NaN,"inputs":"x"}', _token_refusal(18, "NaN")),
+    _nt("an-input-ahead", "batch/read", '{"inputs":[5,NaN]}', _batch_refusal(12, _no_creator("int/Int", "Number value (5)"))),
+    _nt("an-input-behind", "batch/read", '{"inputs":[NaN,5]}', _token_refusal(15, "NaN")),
+    _nt("an-array-input-around-it", "batch/read", '{"inputs":[[NaN]]}', _batch_refusal(12, _ARRAY)),
+    _nt("properties-ahead", "batch/read", '{"properties":"x","inputs":[NaN]}', _batch_refusal(15, _no_creator("String", "String value ('x')"))),
+    _nt("blank-properties-ahead", "batch/read", '{"properties":" ","inputs":[NaN]}', _blank_field("properties")),
+    _nt("blank-properties-behind", "batch/read", '{"inputs":[NaN],"properties":" "}', _token_refusal(15, "NaN")),
+    _nt("a-null-input-ahead", "batch/read", '{"inputs":[null],"properties":NaN}', _token_refusal(34, "NaN")),
+    _nt("a-null-input-and-an-unknown-member", "batch/read", '{"inputs":[null],"bogus":NaN}', _token_refusal(29, "NaN")),
+    _nt("a-null-input-and-an-id", "batch/read", '{"inputs":[null,{"id":NaN}]}', _token_refusal(26, "NaN")),
+    _nt("operator-ahead", "search", "{" + _AN_OPERATOR % '"BOGUS"' + ',"limit":NaN}', _enum_refusal(1, 64)),
+    _nt("operator-behind", "search", '{"limit":NaN,' + _AN_OPERATOR % '"BOGUS"' + "}", _token_refusal(13, "NaN")),
+    _nt("operator-ahead-in-its-filter", "search", '{"filterGroups":[{"filters":[{"propertyName":"name","operator":"BOGUS","value":NaN}]}]}', _enum_refusal(1, 64)),
+    _nt("operator-behind-in-its-filter", "search", '{"filterGroups":[{"filters":[{"propertyName":"name","value":NaN,"operator":"BOGUS"}]}]}', _token_refusal(64, "NaN")),
+    _nt("operator-ahead-of-filters", "search", '{"filterGroups":[{"filters":[{"propertyName":"name","operator":"BOGUS"}]},{"filters":Infinity}]}', _enum_refusal(1, 64)),
+    _nt("blank-operator-ahead", "search", "{" + _AN_OPERATOR % '" "' + ',"limit":NaN}', _empty_operator_refusal(0, 0)),
+    _nt("blank-operator-behind", "search", '{"limit":NaN,' + _AN_OPERATOR % '" "' + "}", _token_refusal(13, "NaN")),
+    # after the type and the credential
+    _nt("after-an-unknown-type", "search", '{"limit":NaN}', {"status": "error", "message": "Unable to infer object type from: nosuchtype"}, object_type="nosuchtype"),
+    _nt("after-the-credential", "batch/read", '{"inputs":[NaN]}', 401, authed=False),
+    # inside a string the three spellings are text
+    _nt("an-id", "batch/read", '{"inputs":["NaN"]}', 207),
+    _nt("an-id-in-an-object", "batch/read", '{"inputs":[{"id":"-Infinity"}]}', 207),
+    _nt("a-query", "search", '{"query":"Infinity"}', 200),
+    _nt("a-filter-value-with-quotes", "search", _A_FILTER % '"a \\"NaN\\" b"', 200),
+    _nt("after-an-empty-string", "search", '{"query":"","bogus":"NaN"}', 200),
+]
+# fmt: on
+
+
+@pytest.mark.parametrize("route, raw, want, object_type, authed", _TOKEN_ROWS)
+def test_hubspot_refuses_a_non_standard_number_token(
+    client, admin_h, route, raw, want, object_type, authed
+):
+    """`_non_standard_number`'s rule, one body per row: the status and body real answered,
+    including which value it names when the body also holds one `_refuse_a_batch_read_shape` or
+    `_refuse_an_operator` refuses, and the status for the three spellings inside a string, which
+    real reads as text (a 207 for batch/read because no company has those ids)."""
+    headers = {"Content-Type": "application/json", **(admin_h if authed else {})}
+    url = f"/hubspot/crm/v3/objects/{object_type}/{route}"
+    content = raw if isinstance(raw, bytes) else raw.encode()
+    r = client.post(url, headers=headers, content=content)
     if isinstance(want, dict):
         assert (r.status_code, r.json()) == (400, want)
     else:

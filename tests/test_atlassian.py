@@ -1750,11 +1750,180 @@ def test_jira_comma_joins_a_repeated_string_parameter_before_validating_it(paged
 
 
 @pytest.mark.parametrize("slash", ["", "/"])
-def test_jira_search_refuses_an_integer_parameter_it_cannot_convert(client, admin_h, slash):
-    r = client.get(f"/atlassian/rest/api/3/search/jql{slash}?maxResults=abc", headers=admin_h)
+@pytest.mark.parametrize(
+    "param,value",
+    [("maxResults", "abc"), ("fieldsByKeys", "x"), ("failFast", "x"), ("reconcileIssues", "a")],
+)
+def test_jira_search_refuses_a_parameter_it_cannot_convert(client, admin_h, slash, param, value):
+    r = client.get(f"/atlassian/rest/api/3/search/jql{slash}?{param}={value}", headers=admin_h)
     assert r.status_code == 400, r.text
-    assert r.json()["detail"] == "Failed to convert 'maxResults' with value: 'abc'"
+    assert r.json()["detail"] == f"Failed to convert '{param}' with value: '{value}'"
     assert r.json()["instance"] == f"/rest/api/3/search/jql{slash}"
+
+
+_ANY_PROJECT = "jql=project%20is%20not%20EMPTY"
+_BOUNDED = f"{_ANY_PROJECT}&maxResults=1"
+_RECONCILE_TOO_MANY = {
+    "errorMessages": ["The max number of issues to reconcile is 50."],
+    "errors": {},
+}
+
+
+def _ids(n: int) -> str:
+    """``n`` distinct `reconcileIssues` values, as a query string."""
+    return "&".join(f"reconcileIssues={10000 + i}" for i in range(n))
+
+
+@pytest.mark.parametrize(
+    "query,named",
+    [
+        # fieldsByKeys: the first value, Java's trim off it, matched in any case
+        (f"{_BOUNDED}&fieldsByKeys=true", None),
+        (f"{_BOUNDED}&fieldsByKeys=TRUE", None),
+        (f"{_BOUNDED}&fieldsByKeys=False", None),
+        (f"{_BOUNDED}&fieldsByKeys=yes", None),
+        (f"{_BOUNDED}&fieldsByKeys=ON", None),
+        (f"{_BOUNDED}&fieldsByKeys=no", None),
+        (f"{_BOUNDED}&fieldsByKeys=off", None),
+        (f"{_BOUNDED}&fieldsByKeys=1", None),
+        (f"{_BOUNDED}&fieldsByKeys=0", None),
+        (f"{_BOUNDED}&fieldsByKeys=", None),
+        (f"{_BOUNDED}&fieldsByKeys=%20true", None),
+        (f"{_BOUNDED}&fieldsByKeys=true%20", None),
+        (f"{_BOUNDED}&fieldsByKeys=%01true", None),
+        (f"{_BOUNDED}&fieldsByKeys=true%1F", None),
+        (f"{_BOUNDED}&fieldsByKeys=ye%C5%BF", None),
+        (f"{_BOUNDED}&fieldsByKeys=yes&fieldsByKeys=x", None),
+        (f"{_BOUNDED}&fieldsByKeys=yes&fieldsByKeys=%20", None),
+        (f"{_BOUNDED}&fieldsByKeys=x", ("fieldsByKeys", "x")),
+        (f"{_BOUNDED}&fieldsByKeys=null", ("fieldsByKeys", "null")),
+        (f"{_BOUNDED}&fieldsByKeys=2", ("fieldsByKeys", "2")),
+        (f"{_BOUNDED}&fieldsByKeys=y", ("fieldsByKeys", "y")),
+        (f"{_BOUNDED}&fieldsByKeys=n", ("fieldsByKeys", "n")),
+        (f"{_BOUNDED}&fieldsByKeys=%20", ("fieldsByKeys", " ")),
+        (f"{_BOUNDED}&fieldsByKeys=%01", ("fieldsByKeys", "\x01")),
+        (f"{_BOUNDED}&fieldsByKeys=tr%20ue", ("fieldsByKeys", "tr ue")),
+        (f"{_BOUNDED}&fieldsByKeys=%C2%A0true", ("fieldsByKeys", "\xa0true")),
+        (f"{_BOUNDED}&fieldsByKeys=%C2%85true", ("fieldsByKeys", "\x85true")),
+        (f"{_BOUNDED}&fieldsByKeys=%E2%80%80true", ("fieldsByKeys", "\u2000true")),
+        (f"{_BOUNDED}&fieldsByKeys=o%EF%AC%80", ("fieldsByKeys", "o\ufb00")),
+        (f"{_BOUNDED}&fieldsByKeys=x&fieldsByKeys=yes", ("fieldsByKeys", None)),
+        (f"{_BOUNDED}&fieldsByKeys=&fieldsByKeys=yes", ("fieldsByKeys", None)),
+        # failFast: read by the same rule
+        (f"{_BOUNDED}&failFast=TRUE", None),
+        (f"{_BOUNDED}&failFast=", None),
+        (f"{_BOUNDED}&failFast=%00true", None),
+        (f"{_BOUNDED}&failFast=ye%C5%BF", None),
+        (f"{_BOUNDED}&failFast=yes&failFast=x", None),
+        (f"{_BOUNDED}&failFast=x", ("failFast", "x")),
+        (f"{_BOUNDED}&failFast=null", ("failFast", "null")),
+        (f"{_BOUNDED}&failFast=2", ("failFast", "2")),
+        (f"{_BOUNDED}&failFast=%20", ("failFast", " ")),
+        (f"{_BOUNDED}&failFast=%C2%A0true", ("failFast", "\xa0true")),
+        (f"{_BOUNDED}&failFast=o%EF%AC%80", ("failFast", "o\ufb00")),
+        (f"{_BOUNDED}&failFast=x&failFast=yes", ("failFast", None)),
+        (f"{_BOUNDED}&failFast=&failFast=yes", ("failFast", None)),
+        # reconcileIssues: every value, the blank ones passed over
+        (f"{_BOUNDED}&reconcileIssues=1", None),
+        (f"{_BOUNDED}&reconcileIssues=-1", None),
+        (f"{_BOUNDED}&reconcileIssues=%2B1", None),
+        (f"{_BOUNDED}&reconcileIssues=%201", None),
+        (f"{_BOUNDED}&reconcileIssues=1%20", None),
+        (f"{_BOUNDED}&reconcileIssues=1%202", None),
+        (f"{_BOUNDED}&reconcileIssues=%D9%A1", None),
+        (f"{_BOUNDED}&reconcileIssues=9223372036854775807", None),
+        (f"{_BOUNDED}&reconcileIssues=-9223372036854775808", None),
+        (f"{_BOUNDED}&reconcileIssues=", None),
+        (f"{_BOUNDED}&reconcileIssues=%20", None),
+        (f"{_BOUNDED}&reconcileIssues=1&reconcileIssues=2", None),
+        (f"{_BOUNDED}&reconcileIssues=&reconcileIssues=1", None),
+        (f"{_BOUNDED}&reconcileIssues=%20&reconcileIssues=1", None),
+        (f"{_BOUNDED}&reconcileIssues=a", ("reconcileIssues", "a")),
+        (f"{_BOUNDED}&reconcileIssues=1.5", ("reconcileIssues", "1.5")),
+        (f"{_BOUNDED}&reconcileIssues=1%2C2", ("reconcileIssues", "1,2")),
+        (f"{_BOUNDED}&reconcileIssues=1_0", ("reconcileIssues", "1_0")),
+        (f"{_BOUNDED}&reconcileIssues=%C2%A01", ("reconcileIssues", "\xa01")),
+        (f"{_BOUNDED}&reconcileIssues=%011", ("reconcileIssues", "\x011")),
+        (
+            f"{_BOUNDED}&reconcileIssues=9223372036854775808",
+            ("reconcileIssues", "9223372036854775808"),
+        ),
+        (
+            f"{_BOUNDED}&reconcileIssues=-9223372036854775809",
+            ("reconcileIssues", "-9223372036854775809"),
+        ),
+        (f"{_BOUNDED}&reconcileIssues=1&reconcileIssues=a", ("reconcileIssues", None)),
+        (f"{_BOUNDED}&reconcileIssues=a&reconcileIssues=1", ("reconcileIssues", None)),
+        (
+            f"{_BOUNDED}&reconcileIssues=1&reconcileIssues=9223372036854775808",
+            ("reconcileIssues", None),
+        ),
+        # two refusals at once: the one real names
+        (f"{_ANY_PROJECT}&maxResults=abc&fieldsByKeys=x", ("maxResults", "abc")),
+        (f"{_ANY_PROJECT}&fieldsByKeys=x&maxResults=abc", ("maxResults", "abc")),
+        (f"{_ANY_PROJECT}&reconcileIssues=a&maxResults=abc", ("maxResults", "abc")),
+        (f"{_BOUNDED}&reconcileIssues=a&fieldsByKeys=x", ("fieldsByKeys", "x")),
+        (f"{_ANY_PROJECT}&fieldsByKeys=x&nextPageToken=bogus", ("fieldsByKeys", "x")),
+        (f"{_ANY_PROJECT}&reconcileIssues=a&maxResults=0", ("reconcileIssues", "a")),
+        (f"{_ANY_PROJECT}&maxResults=abc&failFast=x", ("maxResults", "abc")),
+        (f"{_ANY_PROJECT}&failFast=x&maxResults=abc", ("maxResults", "abc")),
+        (f"{_BOUNDED}&failFast=x&fieldsByKeys=x", ("fieldsByKeys", "x")),
+        (f"{_BOUNDED}&failFast=x&reconcileIssues=a", ("failFast", "x")),
+        (f"{_BOUNDED}&reconcileIssues=a&failFast=x", ("failFast", "x")),
+        (f"{_ANY_PROJECT}&failFast=x&nextPageToken=bogus", ("failFast", "x")),
+        (f"{_ANY_PROJECT}&failFast=x&maxResults=0", ("failFast", "x")),
+        ("failFast=x", ("failFast", "x")),
+        # the cap: more than 50 values, a blank one counted, after the conversions and the page
+        # token and before the range and the unbounded JQL
+        (f"{_BOUNDED}&{_ids(50)}", None),
+        (f"{_BOUNDED}&{_ids(49)}&reconcileIssues=", None),
+        (f"{_BOUNDED}&{_ids(51)}", _RECONCILE_TOO_MANY),
+        (f"{_BOUNDED}&" + "&".join(["reconcileIssues=1"] * 51), _RECONCILE_TOO_MANY),
+        (f"{_BOUNDED}&{_ids(50)}&reconcileIssues=", _RECONCILE_TOO_MANY),
+        (f"{_BOUNDED}&{_ids(50)}&reconcileIssues=%20", _RECONCILE_TOO_MANY),
+        (f"{_BOUNDED}&{_ids(50)}&reconcileIssues=a", ("reconcileIssues", None)),
+        (f"{_BOUNDED}&fieldsByKeys=x&{_ids(51)}", ("fieldsByKeys", "x")),
+        (f"{_BOUNDED}&failFast=x&{_ids(51)}", ("failFast", "x")),
+        (f"{_BOUNDED}&failFast=yes&{_ids(51)}", _RECONCILE_TOO_MANY),
+        (f"{_ANY_PROJECT}&maxResults=abc&{_ids(51)}", ("maxResults", "abc")),
+        (f"{_ANY_PROJECT}&nextPageToken=bogus&{_ids(51)}", errors_atlassian.bad_page_token().body),
+        (f"{_ANY_PROJECT}&maxResults=0&{_ids(51)}", _RECONCILE_TOO_MANY),
+        (_ids(51), _RECONCILE_TOO_MANY),
+    ],
+)
+def test_jira_search_get_reads_fields_by_keys_fail_fast_and_reconcile_issues(
+    client, admin_h, query, named
+):
+    """Real's answers to the GET form, for the rules `_bool_param` and `_jira_long_list_param`
+    describe and the cap on `reconcileIssues`: ``named`` is the parameter a 400 names and the value
+    it names as sent, or ``None`` where the parameter repeats and the 400 names the array (see
+    `test_jira_reports_the_whole_array_when_the_first_repeated_value_will_not_convert`), or the
+    whole body of a 400 that names no parameter. A row without one is served."""
+    r = client.get(f"/atlassian/rest/api/3/search/jql?{query}", headers=admin_h)
+    if named is None:
+        assert r.status_code == 200, r.text
+        return
+    if isinstance(named, dict):
+        assert (r.status_code, r.json()) == (400, named), r.text
+        assert r.headers["content-type"] == "application/json;charset=UTF-8"
+        return
+    param, shown = named
+    assert r.status_code == 400, r.text
+    assert r.headers["content-type"] == "application/problem+json;charset=UTF-8"
+    body = r.json()
+    detail = body.pop("detail")
+    if shown is None:
+        assert re.fullmatch(
+            rf"Failed to convert '{param}' with value: '\[Ljava\.lang\.String;@[0-9a-f]+'", detail
+        ), detail
+    else:
+        assert detail == f"Failed to convert '{param}' with value: '{shown}'"
+    assert body == {
+        "type": "about:blank",
+        "title": "Bad Request",
+        "status": 400,
+        "instance": "/rest/api/3/search/jql",
+    }
 
 
 @pytest.mark.parametrize("param", ["limit", "start"])
@@ -2816,6 +2985,7 @@ def test_jira_search_post_refuses_an_unknown_body_field(client, admin_h, bogus):
         ("fields", ["summary"]),
         ("fields", [1, None, True]),
         ("fieldsByKeys", True),
+        ("failFast", True),
         ("expand", "names"),
         ("properties", ["prop1"]),
         ("reconcileIssues", [1, 2]),
@@ -2847,15 +3017,17 @@ def _properties_null(index: int) -> dict:
     return {"message": f"at index {index}", "status-code": 500, "stack-trace": ""}
 
 
-# What real answers for a value of each of the four bean members Backlot does not act on, alone and
-# beside a second refusal: the rules are `_jira_fields_by_keys_ok`, `_jira_reconcile_issue_ok` and
-# where `jira_search` raises the two 500s. `None` is a 200. The one value of each that
+# What real answers for a value of each of the five bean members other than `fields` that Backlot
+# does not act on, alone and beside a second refusal: the rules are `_jira_bean_boolean_ok`,
+# `_jira_reconcile_issue_ok`, the cap on `reconcileIssues` and where `jira_search` raises the two
+# 500s. `None` is a 200. The one value of each that
 # `test_jira_search_post_accepts_every_field_the_vendors_bean_declares` serves is left to that test.
 _BEAN_MEMBER_ROWS = [
     *[(_bean(f'"expand": {v}'), None) for v in ('"bogus"', '""', "1", "1.5", "true", "null")],
     *[(_bean(f'"expand": {v}'), _BEAN_REFUSED) for v in ("[]", '["names"]', "[1]", "{}")],
     *[
-        (_bean(f'"fieldsByKeys": {v}'), None)
+        (_bean(f'"{member}": {v}'), None)
+        for member in ("fieldsByKeys", "failFast")
         for v in (
             *("false", "null", "0", "2", "-1", "9223372036854775808"),
             *('"true"', '"True"', '"TRUE"', '"false"', '"False"', '"FALSE"', '" TRUE "'),
@@ -2864,7 +3036,8 @@ _BEAN_MEMBER_ROWS = [
         )
     ],
     *[
-        (_bean(f'"fieldsByKeys": {v}'), _BEAN_REFUSED)
+        (_bean(f'"{member}": {v}'), _BEAN_REFUSED)
+        for member in ("fieldsByKeys", "failFast")
         for v in (
             *('"yes"', '"x"', '"tRuE"', '"NULL"', '"1"', '"\\u00a0true"'),
             *("1.5", "1.0", "[]", "{}"),
@@ -2938,6 +3111,41 @@ _BEAN_MEMBER_ROWS = [
             _bean('"reconcileIssues": null, "properties": [null]'),
         )
     ],
+    (
+        _bean(f'"reconcileIssues": {[10000 + i for i in range(50)]}'),
+        None,
+    ),
+    (
+        _bean(f'"reconcileIssues": {[10000 + i for i in range(51)]}'),
+        _RECONCILE_TOO_MANY,
+    ),
+    (
+        _bean(f'"reconcileIssues": {[10000 + i for i in range(51)]}', jql=None),
+        _RECONCILE_TOO_MANY,
+    ),
+    (
+        _bean(f'"reconcileIssues": {[10000 + i for i in range(51)]}, "maxResults": 0'),
+        _RECONCILE_TOO_MANY,
+    ),
+    (
+        _bean(f'"reconcileIssues": {[10000 + i for i in range(51)]}, "nextPageToken": "bogus"'),
+        errors_atlassian.bad_page_token().body,
+    ),
+    # A null or an empty element counts toward the cap; a 500 and a binding refusal come first.
+    *[
+        (_bean('"reconcileIssues": ' + json.dumps(ids)), want)
+        for ids, want in (
+            ([10000 + i for i in range(50)] + [None], _RECONCILE_TOO_MANY),
+            ([10000 + i for i in range(50)] + [""], _RECONCILE_TOO_MANY),
+            ([None] * 50, None),
+            ([None] * 51, _RECONCILE_TOO_MANY),
+        )
+    ],
+    (
+        _bean(f'"reconcileIssues": {[10000 + i for i in range(51)]}, "properties": [null]'),
+        _properties_null(0),
+    ),
+    (_bean(f'"reconcileIssues": {[10000 + i for i in range(51)]}, "failFast": "x"'), _BEAN_REFUSED),
 ]
 
 
@@ -3827,11 +4035,13 @@ _CREDENTIALS = {
         ("GET", "/atlassian/rest/api/3/myself", "failed-pair", 401),
         ("GET", "/atlassian/rest/api/3/myself", "unknown-scheme", 401),
         ("DELETE", "/atlassian/rest/api/3/screens/999999999", "none", 401),
+        ("GET", "/atlassian/rest/api/2/policies/project/NOPE/rules", "none", 401),
         # the controls: one that runs anonymously on real, where Backlot has no operation to run,
         # and the same refused path with a credential, both the baseline's gap; and a bearer it
         # cannot read on a GET, which is the Connect-token 403 before any of this
         ("GET", "/atlassian/rest/api/3/dashboard", "none", 404),
         ("GET", "/atlassian/rest/api/3/myself", "admin", 404),
+        ("GET", "/atlassian/rest/api/2/policies/project/NOPE/rules", "admin", 404),
         ("GET", "/atlassian/rest/api/3/myself", "unreadable-bearer", 403),
         # an `OPTIONS` on a path Jira publishes something at, served here or not
         ("OPTIONS", "/atlassian/rest/api/3/serverInfo", "none", 401),
@@ -3879,6 +4089,8 @@ _REMOVE_TEMPLATE = "/atlassian/rest/api/3/project-template/remove-template"
 _SERVICE_REGISTRY = "/atlassian/rest/atlassian-connect/1/service-registry?serviceIds=1"
 _COLUMNS = "/atlassian/rest/api/2/settings/columns"
 _PREFERENCES = "/atlassian/rest/api/3/mypreferences"
+_AGENTS = "/atlassian/rest/api/3/agents/bulk/invoke/batch"
+_POLICIES = "/atlassian/rest/api/3/policies/project/NOPE/policies"
 #: a `Content-Type` Spring cannot read, which the 415 names no type for
 _UNREAD = object()
 _JSON = "application/json"
@@ -3912,6 +4124,12 @@ _JSON = "application/json"
         ("PUT", _BANNER, "none", "application/json;charset=latin1", "{}", 401, None, None),
         ("PUT", _BANNER, "none", 'application/json;charset="utf-8"', "{}", 401, None, None),
         ("PUT", _BANNER, "none", "application/json;x", "{}", 401, None, None),
+        # the same check on the bulk agent invocation, a POST
+        ("POST", _AGENTS, "none", "text/plain", "x", 415, "text/plain", _JSON),
+        ("POST", _AGENTS, "admin", "text/plain", "x", 415, "text/plain", _JSON),
+        ("POST", _AGENTS, "none", None, None, 415, "null", _JSON),
+        ("POST", _AGENTS, "none", _JSON, "{}", 401, None, None),
+        ("POST", _AGENTS, "admin", _JSON, "{}", 404, None, None),
         # an `OPTIONS` is not checked, and an unreadable bearer is refused before the check
         ("OPTIONS", _BANNER, "none", "text/plain", "x", 401, None, None),
         ("PUT", _BANNER, "unreadable-bearer", "text/plain", "x", 403, None, None),
@@ -3941,6 +4159,10 @@ _JSON = "application/json"
             None,
             None,
         ),
+        # one documented with a JSON body that checks the type only behind the 401
+        ("PUT", _POLICIES, "none", "text/plain", "x", 401, None, None),
+        ("PUT", _POLICIES, "none", "foo", "x", 401, None, None),
+        ("PUT", _POLICIES, "none", None, None, 401, None, None),
         # two the documents give no body that check for JSON all the same, a GET among them
         ("DELETE", _REMOVE_TEMPLATE, "none", None, None, 415, "null", _JSON),
         ("DELETE", _REMOVE_TEMPLATE, "none", _JSON, "{}", 401, None, None),
