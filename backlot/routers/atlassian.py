@@ -217,6 +217,12 @@ _P_CONTENT_CHILD = {"parameters": [qp("limit", "integer"), qp("start", "integer"
 _JIRA_COMMENT_PAGE_MAX = 100
 _JIRA_ORDER_FIELD = "created"
 
+# Java's `^([+-]?)\s*(.*)$` under `find`: `\s` is the six ASCII spaces, `.` stops at a line
+# terminator, and `$` matches at the end or before one final line terminator (`_jira_order_desc`).
+_JIRA_ORDER = re.compile(
+    "([+-]?)[ \t\n\x0b\x0c\r]*([^\n\r\x85\u2028\u2029]*)(?:\r\n|[\n\r\x85\u2028\u2029])?\\Z"
+)
+
 
 def _jira_order_desc(raw: str) -> bool:
     """Whether ``orderBy`` asks for the reverse, or Jira's 400 for a field it does not order by.
@@ -230,22 +236,24 @@ def _jira_order_desc(raw: str) -> bool:
     the ascending spelling Atlassian's own document writes — arrives here as `" created"`. Real
     Jira answers 200 to it, so stripping is what matches rather than a special case for `+`.
 
-    The strip is Java's `String.trim`, the same trim :func:`_jira_project_order` measured on
-    `project/search`: every character up to U+0020 comes off both ends and nothing past it.
-    Measured against Jira Cloud on the comment read (2026-10-16): `%01created` and `created%01`
-    are 200, where Python's `str.strip()` keeps U+0001 and refuses both; `%0Bcreated` is 200
-    under either trim; and a no-break space (`%C2%A0created`) or an em space (`%E2%80%83created`)
-    — whitespace Python strips and Java does not — stays in the field, so the 400 names what is
-    left in front of `created`.
+    Real's answers fit Java reading the value, though Jira does not say so: `String.trim` (every
+    character up to U+0020 off both ends, as :func:`_jira_project_order` measured on
+    `project/search`), then the pattern `^([+-]?)\\s*(.*)$` (:data:`_JIRA_ORDER`), whose `\\s` is
+    ASCII and whose `.` and `$` stop at a line terminator. Measured against Jira Cloud on the
+    comment read (2026-10-16 and 2026-10-17): `%01created`, `created%01` and `%01-created` are 200;
+    after the sigil `%20`, `%09`, `%0A`, `%0B`, `%0C` and `%0D` go and `%01`, `%1F`, a no-break
+    space and an em space stay (`-%01created` names U+0001 and `created`); a no-break space or an em
+    space in front stays in the field too; one line terminator at the end goes (`created%C2%85` is
+    200) and one anywhere else matches nothing, so the 400 names the value whole, sigil and all
+    (`-%C2%85created`, `-cre%0Aated`).
 
     An EMPTY value is refused, not read as absent: the field it leaves is the empty string, and
     real Jira answers 400 to `?orderBy=`.
     """
     field = raw.strip(_JAVA_TRIMMED)
     desc = False
-    if field[:1] in ("+", "-"):
-        desc = field[0] == "-"
-        field = field[1:].strip(_JAVA_TRIMMED)
+    if (m := _JIRA_ORDER.match(field)) is not None:
+        desc, field = m[1] == "-", m[2]
     if field.casefold() != _JIRA_ORDER_FIELD:
         # Backlot's own sentence, not a transcription: Jira localises this one to the account's
         # language, and the account it was measured against answers in Korean.
