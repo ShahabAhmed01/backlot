@@ -252,6 +252,29 @@ def test_gmail_q_parse_and_match():
     assert free == "quarterly" and ops["in"] == ["anywhere"]
 
 
+@pytest.mark.parametrize(
+    "q, free, ops",
+    [
+        ("subject: rollout", "", {"subject": ["rollout"]}),
+        ("subject:\trollout", "", {"subject": ["rollout"]}),
+        ("label: inbox", "", {"label": ["inbox"]}),
+        ("in:\tsent", "", {"in": ["sent"]}),
+        ("after: 2026/10/01", "", {"after": ["1790812800"]}),
+        ("before:   2026/10/01", "", {"before": ["1790812800"]}),
+        ("newer: 2026/10/01", "", {"after": ["1790812800"]}),
+        ("older: 2026/10/01", "", {"before": ["1790812800"]}),
+        ("after:\t2026/10/01", "after: 2026/10/01", {}),
+        ("has: attachment", "has: attachment", {}),
+        ("newer_than: 7d", "newer_than: 7d", {}),
+    ],
+)
+def test_gmail_operators_read_across_whitespace(q, free, ops):
+    """Each row is how the comment on `_GMAIL_OP` reads its query."""
+    from backlot.routers.google import _parse_gmail_q
+
+    assert _parse_gmail_q(q) == (free, ops)
+
+
 def test_gmail_folder_query_sees_the_label_a_message_is_served_under(db):
     """A message the corpus gives no labels is served `labelIds: ["INBOX"]`, so `in:inbox` and
     `label:inbox` have to find it — reading only the STATED labels answered "no such mail" about
@@ -479,6 +502,39 @@ def test_gmail_after_before_over_the_wire(tmp_path):
         assert count("-after:2026/10/01") == count("before:2026/10/01") == 1
         assert count("-after:abc") == 3
         assert count("before:99999999999999999999") == 0
+
+
+@pytest.mark.parametrize(
+    "q, free, ops",
+    [
+        ("-from:bob", "", {"-from": ["bob"]}),
+        ("from:-bob", "", {"-from": ["bob"]}),
+        ("-FROM:bob", "", {"-from": ["bob"]}),
+        ("-from: bob", "", {"-from": ["bob"]}),
+        ("from: -bob", "", {"-from": ["bob"]}),
+        ("-from:-bob", "", {"-from": ["bob"]}),
+        ("--from:bob", "", {"-from": ["bob"]}),
+        ("from:--bob", "", {"-from": ["bob"]}),
+        ('-from:"bob"', "", {"-from": ["bob"]}),
+        ("-to:ava", "", {"-to": ["ava"]}),
+        ("cc:-lena", "", {"-cc": ["lena"]}),
+        ("-bcc:lena", "", {"-bcc": ["lena"]}),
+        ("-cc:lena+update", "+update", {"-cc": ["lena"]}),
+        ('from:"-bob"', "", {"from": ["-bob"]}),
+        ("from:mary-jane", "", {"from": ["mary-jane"]}),
+        ("-from:", "", {}),
+        ("from:-", "", {}),
+        ("-from:-", "", {}),
+        ("from:--", "", {}),
+        ('-from:""', "", {}),
+        ("label:-", "", {"label": ["-"]}),
+    ],
+)
+def test_gmail_a_minus_negates_an_address_operator(q, free, ops):
+    """Each row is how the comment on `_GMAIL_NEGATED_ADDRESS` reads its query."""
+    from backlot.routers.google import _parse_gmail_q
+
+    assert _parse_gmail_q(q) == (free, ops)
 
 
 def test_github_search_q_parse():
