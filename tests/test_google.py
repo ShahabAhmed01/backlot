@@ -9898,10 +9898,18 @@ def test_gmail_empty_address_tokens_preserve_quoted_subjects(tmp_path, surface, 
         ("from:no--reply", {"hyphen"}),
         ("from:jt-snowball.com", set()),
         ("from:@jt-snowball", {"domain"}),
+        ('from:"no-reply"', {"hyphen"}),
+        ('to:"no-reply"', {"hyphen"}),
+        ('cc:"no-reply"', {"hyphen"}),
+        ('bcc:"no-reply"', {"hyphen"}),
+        ('from:"noreply"', {"joined"}),
+        ('from:"jt-snowball"', set()),
     ],
 )
 def test_gmail_hyphenated_address_search(tmp_path, surface, query, expected):
-    """Each row is how `_gmail_address_match` reads a hyphenated value."""
+    """Each row is how `_gmail_address_match` reads a hyphenated value, quoted or not. The quoted
+    `from:"noreply"` row is the control a value with no hyphen cannot lose a joined spelling to;
+    the rest of the quoted rows are the ones that spelling would change."""
     records = [
         {"doc_id": "joined", "author_email": "noreply@shop.example"},
         {"doc_id": "hyphen", "author_email": "no-reply@bank.example"},

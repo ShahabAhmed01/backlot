@@ -823,7 +823,13 @@ def _parse_gmail_q(q: str) -> tuple[str, dict]:
                     if plus:
                         ops.setdefault(stored, []).append(value)
                         return f" +{term} "
-            ops.setdefault(stored, []).append(value.strip('"'))
+            # A quoted address value keeps its quotes so the matcher can tell it from the same value
+            # unquoted: real finds a quoted value's words alone, with no joined spelling beside them
+            # (`_gmail_address_match`).
+            quoted = (
+                key in _GMAIL_ADDRESS_KEYS and len(value) > 1 and value[:1] == value[-1:] == '"'
+            )
+            ops.setdefault(stored, []).append(value if quoted else value.strip('"'))
             return " "
         return m.group(0)
 
@@ -909,7 +915,8 @@ def _gmail_address_match(header: str | None, value: str) -> bool:
     with a hyphen matches its words joined as well (`no-reply` finds `noreply@` beside
     `no-reply@`, `jt-snowball` finds `@jtsnowball.com`) unless it holds `--` or a `.` between two
     word characters (`jt-snowball.com` is its three words alone); a joined value does not find the
-    hyphenated spelling.
+    hyphenated spelling. A quoted value finds its words alone: the joined spelling is not tried, so
+    `from:"no-reply"` answers none where `from:no-reply` answers the messages of `from:noreply`.
 
     Measured on a Workspace mailbox of 595 messages on 2026-10-15: 113 searches on `cc:` and
     `bcc:`, compared with the headers of every message, all match this rule, and of the 32 ASCII
@@ -922,19 +929,26 @@ def _gmail_address_match(header: str | None, value: str) -> bool:
     `cc:` searches with a hyphen in them (a header's words split by one hyphen and by two, into two
     and three parts, beside an `@` or a `.`, and each hyphenated local part whole and in pairs),
     none quoted and none led by `-`, match this rule, and at 604 on 2026-10-18 so did `bcc:` on a
-    word of the one `Bcc` address there, split by one hyphen and by two and beside a `.`. Two forms
-    it does not read: a quoted value found its words alone, and a value led by `-` answered as the
-    negation `-from:` does. On 2026-10-14, `cc:<a local part>+x` read `+x` as a search term of its
-    own."""
+    word of the one `Bcc` address there, split by one hyphen and by two and beside a `.`. On
+    2026-10-19, a quoted value found its words alone, on a mailbox of 603 messages: for each of
+    eight words of six letters or more in a local part the mailbox holds, two on each of `from:`,
+    `to:` and `cc:` and two on `bcc:`, `op:"<half>-<half>"` answered none where `op:<half>-<half>`
+    answered what `op:<word>` answers, and `op:"<word>"` answered what `op:<word>` answers. A
+    value led by `-` answered as the negation `-from:` does. On 2026-10-14, `cc:<a local part>+x`
+    read `+x` as a search term of its own."""
     header = (header or "").lower()
     value = value.lower()
+    # A value the parser kept its quotes around is read alone: no joined spelling beside its words.
+    quoted = len(value) > 1 and value[:1] == value[-1:] == '"'
+    if quoted:
+        value = value[1:-1]
     if _GMAIL_ONE_ADDRESS.fullmatch(value):
         return value in _GMAIL_ADDRESS.findall(header)
     words, have = _GMAIL_ADDRESS_WORD.findall(value), _GMAIL_ADDRESS_WORD.findall(header)
     if not words:
         return True
     alternatives = [words]
-    if "-" in value and not _GMAIL_UNJOINED.search(value):
+    if not quoted and "-" in value and not _GMAIL_UNJOINED.search(value):
         alternatives.append(_GMAIL_ADDRESS_WORD.findall(value.replace("-", "")))
     return any(
         have[i : i + len(option)] == option
@@ -1000,7 +1014,7 @@ def _gmail_query(conn, mailbox, ids, q: str, caller_email: str | None = None) ->
     if caller_email:
         for key in ("from", "to", "cc", "bcc", "-from", "-to", "-cc", "-bcc"):
             if key in ops:
-                ops[key] = [caller_email if v.lower() == "me" else v for v in ops[key]]
+                ops[key] = [caller_email if v.strip('"').lower() == "me" else v for v in ops[key]]
     ops = _resolve_relative_dates(ops)  # newer_than:/older_than: -> absolute after:/before: bounds
     if free:
         # Honor a fully "quoted" free-text term as a phrase (Gmail's quote semantics): match the
