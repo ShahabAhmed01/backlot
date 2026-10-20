@@ -9672,6 +9672,8 @@ def test_gmail_cc_bcc_searches_address_headers(tmp_path, surface, caller, query,
         ("ava", "to:av", []),
         ("ava", "from:bo", []),
         ("ava", "from:me", ["reply"]),
+        ("ava", 'from:"me"', ["reply"]),
+        ("ava", 'to:"me"', ["plan", "lunch"]),
         ("ava", "from:", ["plan", "lunch", "reply"]),
         ("ava", "to:dev@acme.com", ["reply"]),
         ("ava", "to:dev", ["reply"]),
@@ -9718,6 +9720,7 @@ def test_gmail_cc_bcc_searches_address_headers(tmp_path, surface, caller, query,
         ("ava", "-cc:dev", ["plan", "lunch"]),
         ("ava", "bcc:-ava", ["plan", "reply"]),
         ("ava", "-from:me", ["plan", "lunch"]),
+        ("ava", '-from:"me"', ["plan", "lunch"]),
         ("ava", "-from:bob from:mia", ["lunch"]),
         ("ava", '-from:""', ["plan", "lunch", "reply"]),
         ("ava", "from:-", ["plan", "lunch", "reply"]),
@@ -9904,12 +9907,16 @@ def test_gmail_empty_address_tokens_preserve_quoted_subjects(tmp_path, surface, 
         ('bcc:"no-reply"', {"hyphen"}),
         ('from:"noreply"', {"joined"}),
         ('from:"jt-snowball"', set()),
+        ('from:"@jt-snowball"', set()),
+        ('-from:"no-reply"', {"joined", "domain"}),
+        ('-to:"no-reply"', {"joined", "domain"}),
+        ('-cc:"no-reply"', {"joined", "domain"}),
+        ('-from:"jt-snowball"', {"joined", "hyphen", "domain"}),
     ],
 )
 def test_gmail_hyphenated_address_search(tmp_path, surface, query, expected):
-    """Each row is how `_gmail_address_match` reads a hyphenated value, quoted or not. The quoted
-    `from:"noreply"` row is the control a value with no hyphen cannot lose a joined spelling to;
-    the rest of the quoted rows are the ones that spelling would change."""
+    """Each row is how `_gmail_address_match` reads a value with a hyphen or without one, quoted or
+    not, and how a `-` in front negates it."""
     records = [
         {"doc_id": "joined", "author_email": "noreply@shop.example"},
         {"doc_id": "hyphen", "author_email": "no-reply@bank.example"},

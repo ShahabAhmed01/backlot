@@ -358,8 +358,8 @@ def test_gmail_plus_ends_an_address_or_subject_value():
     assert _parse_gmail_q("from:lena+news@acme.com") == ("", {"from": ["lena+news@acme.com"]})
     assert _parse_gmail_q("cc:lena@acme.com++") == ("", {"cc": ["lena@acme.com"]})
     assert _parse_gmail_q("cc:@acme.com+x") == ("+x", {"cc": ["@acme.com"]})
-    # A quoted value keeps its `+` — and its quotes, so the matcher reads it alone — and so does
-    # `label:`.
+    # A quoted address value keeps its `+` and its quotes, which tell the matcher to read it alone;
+    # `label:` keeps its `+` too.
     assert _parse_gmail_q('cc:"lena+x"') == ("", {"cc": ['"lena+x"']})
     assert _parse_gmail_q("label:inbox+x") == ("", {"label": ["inbox+x"]})
 

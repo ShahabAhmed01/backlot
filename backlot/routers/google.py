@@ -823,9 +823,7 @@ def _parse_gmail_q(q: str) -> tuple[str, dict]:
                     if plus:
                         ops.setdefault(stored, []).append(value)
                         return f" +{term} "
-            # A quoted address value keeps its quotes so the matcher can tell it from the same value
-            # unquoted: real finds a quoted value's words alone, with no joined spelling beside them
-            # (`_gmail_address_match`).
+            # A quoted address value keeps its quotes, which `_gmail_address_match` reads.
             quoted = (
                 key in _GMAIL_ADDRESS_KEYS and len(value) > 1 and value[:1] == value[-1:] == '"'
             )
@@ -915,8 +913,8 @@ def _gmail_address_match(header: str | None, value: str) -> bool:
     with a hyphen matches its words joined as well (`no-reply` finds `noreply@` beside
     `no-reply@`, `jt-snowball` finds `@jtsnowball.com`) unless it holds `--` or a `.` between two
     word characters (`jt-snowball.com` is its three words alone); a joined value does not find the
-    hyphenated spelling. A quoted value finds its words alone: the joined spelling is not tried, so
-    `from:"no-reply"` answers none where `from:no-reply` answers the messages of `from:noreply`.
+    hyphenated spelling. A quoted value is matched without its quotes and with no joined spelling:
+    `from:"no-reply"` finds `no-reply@` and not `noreply@`.
 
     Measured on a Workspace mailbox of 595 messages on 2026-10-15: 113 searches on `cc:` and
     `bcc:`, compared with the headers of every message, all match this rule, and of the 32 ASCII
@@ -929,13 +927,16 @@ def _gmail_address_match(header: str | None, value: str) -> bool:
     `cc:` searches with a hyphen in them (a header's words split by one hyphen and by two, into two
     and three parts, beside an `@` or a `.`, and each hyphenated local part whole and in pairs),
     none quoted and none led by `-`, match this rule, and at 604 on 2026-10-18 so did `bcc:` on a
-    word of the one `Bcc` address there, split by one hyphen and by two and beside a `.`. On
-    2026-10-19, a quoted value found its words alone, on a mailbox of 603 messages: for each of
-    eight words of six letters or more in a local part the mailbox holds, two on each of `from:`,
-    `to:` and `cc:` and two on `bcc:`, `op:"<half>-<half>"` answered none where `op:<half>-<half>`
-    answered what `op:<word>` answers, and `op:"<word>"` answered what `op:<word>` answers. A
-    value led by `-` answered as the negation `-from:` does. On 2026-10-14, `cc:<a local part>+x`
-    read `+x` as a search term of its own."""
+    word of the one `Bcc` address there, split by one hyphen and by two and beside a `.`. At 624
+    on 2026-10-19 so did 444 searches on the four operators, compared with the headers of every
+    message in `messages.list` and `threads.list`: 27 words of five letters or more from the
+    mailbox's local parts, domain labels and display names, each whole, split by a hyphen, both of
+    those quoted, and the quoted two negated; the 7 domain labels among them split after an `@`,
+    quoted and not; and the 37 local parts the mailbox holds that are letters and digits joined by
+    `-`, each whole, joined, both of those quoted, negated quoted and not, and quoted with its
+    domain and as `@<domain>`. A value led by `-` is the negation the comment at
+    `_GMAIL_NEGATED_ADDRESS` measures. On 2026-10-14, `cc:<a local part>+x` read `+x` as a search
+    term of its own."""
     header = (header or "").lower()
     value = value.lower()
     # A value the parser kept its quotes around is read alone: no joined spelling beside its words.
@@ -1012,6 +1013,8 @@ def _gmail_query(conn, mailbox, ids, q: str, caller_email: str | None = None) ->
     present; otherwise the mailbox listing). The caller paginates the returned rows."""
     free, ops = _parse_gmail_q(q)
     if caller_email:
+        # `me` reads through quotes: on 2026-10-19, `op:"me"` and `-op:"me"` answered what `op:me`
+        # and `-op:me` answer on each address operator.
         for key in ("from", "to", "cc", "bcc", "-from", "-to", "-cc", "-bcc"):
             if key in ops:
                 ops[key] = [caller_email if v.strip('"').lower() == "me" else v for v in ops[key]]
